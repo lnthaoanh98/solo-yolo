@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.env
+.greennode.json
+.agentbase/
+venv/
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+node_modules/
+frontend/node_modules/
+frontend/.vite/
