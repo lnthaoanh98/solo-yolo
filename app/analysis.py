@@ -4,7 +4,7 @@ import calendar as calendar_lib
 import json
 import math
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from io import BytesIO
 from typing import Any
 
@@ -16,7 +16,7 @@ import plotly.io as pio
 
 FIELD_SYNONYMS: dict[str, list[str]] = {
     "video_id": ["video_id", "id", "post_id", "content_id", "url", "video_url"],
-    "title": ["title", "video_title", "caption", "description", "content_title", "post_text"],
+    "title": ["title", "video_title", "caption", "title_caption", "description", "content_title", "post_text"],
     "platform": ["platform", "channel", "source", "network"],
     "posted_at": [
         "posted_at",
@@ -28,11 +28,11 @@ FIELD_SYNONYMS: dict[str, list[str]] = {
         "date",
         "post_time",
     ],
-    "content_pillar": ["content_pillar", "pillar", "category", "content_category", "topic", "series"],
+    "content_pillar": ["content_pillar", "content pillar", "pillar", "category", "content_category", "topic", "series"],
     "views": ["views", "view_count", "plays", "video_views", "watch_count"],
-    "likes": ["likes", "like_count", "reactions", "reaction_count"],
-    "comments": ["comments", "comment_count", "replies"],
-    "shares": ["shares", "share_count", "reposts"],
+    "likes": ["likes", "like", "like_count", "likes_count", "reactions", "reaction_count"],
+    "comments": ["comments", "comment", "comment_count", "comments_count", "replies"],
+    "shares": ["shares", "share", "share_count", "shares_count", "reposts"],
     "saves": ["saves", "save_count", "favorites", "bookmarks"],
     "followers_gained": [
         "followers_gained",
@@ -49,13 +49,58 @@ FIELD_SYNONYMS: dict[str, list[str]] = {
         "avg_view_duration",
         "average_view_duration",
         "avg_watch_time",
+        "avg_watch_time_s",
+        "avg_watch_time_sec",
+        "avg_watch_time_seconds",
     ],
-    "duration_seconds": ["duration_seconds", "duration", "video_duration", "length", "video_length"],
+    "duration_seconds": [
+        "duration_seconds",
+        "duration",
+        "duration_s",
+        "duration_sec",
+        "video_duration",
+        "video_duration_s",
+        "video_duration_sec",
+        "video_duration_seconds",
+        "length",
+        "video_length",
+    ],
     "reach": ["reach", "people_reached", "unique_viewers"],
     "impressions": ["impressions", "impression_count"],
     "engagement_rate": ["engagement_rate", "er", "engagement_pct", "engagement_percent"],
-    "retention_rate": ["retention_rate", "completion_rate", "completion_pct", "avg_completion_rate"],
+    "retention_rate": [
+        "retention_rate",
+        "completion_rate",
+        "completion_pct",
+        "completion_percent",
+        "avg_completion_rate",
+        "avg_watch",
+        "avg_watch_pct",
+        "avg_watch_percent",
+        "avg_watch_percentage",
+        "average_watch_percent",
+        "watch_percent",
+        "watch_percentage",
+    ],
 }
+
+POSTED_DATE_SYNONYMS = [
+    "posted_date",
+    "post_date",
+    "publish_date",
+    "upload_date",
+    "created_date",
+    "date",
+]
+
+POSTED_TIME_SYNONYMS = [
+    "posted_time",
+    "post_time",
+    "publish_time",
+    "upload_time",
+    "created_time",
+    "time",
+]
 
 NUMERIC_COUNT_FIELDS = [
     "views",
@@ -156,8 +201,6 @@ def prepare_video_data(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, An
         else:
             data[field] = np.nan
 
-    missing_fields = sorted(set(FIELD_SYNONYMS) - set(field_map))
-
     data["video_id"] = data["video_id"].where(_not_blank(data["video_id"]))
     data["video_id"] = data["video_id"].fillna(pd.Series([f"video-{idx + 1:03d}" for idx in range(len(data))]))
 
@@ -171,7 +214,7 @@ def prepare_video_data(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, An
     data["content_pillar"] = data["content_pillar"].fillna(data["title"].map(infer_content_pillar))
     data["content_pillar"] = data["content_pillar"].astype(str).str.strip().replace("", "Uncategorized")
 
-    data["posted_at_dt"] = pd.to_datetime(data["posted_at"], errors="coerce")
+    data["posted_at_dt"] = _build_posted_datetime(raw, lookup, field_map, data["posted_at"])
     data["posted_date"] = data["posted_at_dt"].dt.date
     data["posted_hour"] = data["posted_at_dt"].dt.hour
     data["posted_weekday"] = data["posted_at_dt"].dt.day_name()
@@ -218,6 +261,7 @@ def prepare_video_data(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, An
     data["rank"] = data["performance_score"].rank(method="min", ascending=False).astype(int)
     data["performance_tier"] = data["performance_score"].map(_tier_from_score)
 
+    missing_fields = sorted(set(FIELD_SYNONYMS) - set(field_map))
     return data, {"field_map": field_map, "missing_fields": missing_fields, "row_count": int(len(data))}
 
 
@@ -705,6 +749,87 @@ def infer_content_pillar(title: Any) -> str:
         if any(keyword in text for keyword in keywords):
             return pillar
     return "Uncategorized"
+
+
+def _build_posted_datetime(
+    raw: pd.DataFrame,
+    lookup: dict[str, str],
+    field_map: dict[str, str],
+    fallback: pd.Series,
+) -> pd.Series:
+    date_col = _find_column(lookup, POSTED_DATE_SYNONYMS)
+    time_col = _find_column(lookup, POSTED_TIME_SYNONYMS)
+
+    if date_col and time_col and date_col != time_col:
+        date_part = raw[date_col].map(_date_text_for_parse)
+        time_part = raw[time_col].map(_time_text_for_parse)
+        combined = (date_part + " " + time_part).str.strip()
+        combined_dt = pd.to_datetime(combined, errors="coerce")
+
+        if combined_dt.notna().any():
+            field_map["posted_at"] = f"{date_col} + {time_col}"
+            field_map["posted_date"] = date_col
+            field_map["posted_time"] = time_col
+            return combined_dt
+
+    if date_col:
+        date_dt = pd.to_datetime(raw[date_col], errors="coerce")
+        if date_dt.notna().any():
+            field_map["posted_at"] = date_col
+            field_map["posted_date"] = date_col
+            return date_dt
+
+    return pd.to_datetime(fallback, errors="coerce")
+
+
+def _date_text_for_parse(value: Any) -> str:
+    if _is_missing_scalar(value):
+        return ""
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+
+    text = str(value).strip()
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.notna(parsed):
+        return parsed.date().isoformat()
+    return text
+
+
+def _time_text_for_parse(value: Any) -> str:
+    if _is_missing_scalar(value):
+        return ""
+    if isinstance(value, pd.Timestamp):
+        return value.time().strftime("%H:%M:%S")
+    if isinstance(value, datetime):
+        return value.time().strftime("%H:%M:%S")
+    if isinstance(value, time):
+        return value.strftime("%H:%M:%S")
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        numeric = float(value)
+        if 0 <= numeric < 1:
+            total_seconds = int(round(numeric * 24 * 60 * 60))
+            hours, remainder = divmod(total_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    text = str(value).strip()
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.notna(parsed):
+        return parsed.time().strftime("%H:%M:%S")
+    return text
+
+
+def _is_missing_scalar(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def _find_column(lookup: dict[str, str], synonyms: list[str]) -> str | None:
